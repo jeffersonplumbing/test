@@ -51,11 +51,14 @@
     async function startSonar() {
       try {
         const audioContext = new AudioContext({ sampleRate: 44100 });
-        const chirpDuration = 0.1; // 100ms chirp for clearer waveform
+        const chirpDuration = 0.05; // 50ms chirp (shortened)
         const chirpInterval = 0.5; // 0.5s between chirps
-        const numChirps = 5;
+        const repeatsPerFreq = 4; // Repeat each tone 4 times per frequency
+        const numFrequencies = 5;
+        const numChirps = numFrequencies * repeatsPerFreq; // Total 20 chirps
         const recordingDuration = 0.5; // Enough for 200ft (~356ms)
         const speedOfSound = 1125; // ft/s
+        const frequencies = [200, 500, 1000, 2000, 4000]; // Optimized wider range
         let recordings = [];
 
         // Get microphone access
@@ -82,9 +85,11 @@
         // Generate and play chirps
         document.getElementById('results').innerText = 'Recording...';
         for (let i = 0; i < numChirps; i++) {
+          const freqIndex = Math.floor(i / repeatsPerFreq);
+          const freq = frequencies[freqIndex];
           const oscillator = audioContext.createOscillator();
           oscillator.type = 'sine';
-          oscillator.frequency.setValueAtTime(200 + (i * 100), audioContext.currentTime); // 200Hz to 600Hz
+          oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
           oscillator.connect(audioContext.destination);
           oscillator.start(audioContext.currentTime + i * chirpInterval);
           oscillator.stop(audioContext.currentTime + i * chirpInterval + chirpDuration);
@@ -111,15 +116,16 @@
 
         // Analyze recordings
         function analyzeRecordings(buffers) {
-          const distances = [];
+          const allDistances = Array(numFrequencies).fill().map(() => []); // Group by frequency
           buffers.forEach((buffer, i) => {
+            const freqIndex = Math.floor(i / repeatsPerFreq);
+            const freq = frequencies[freqIndex];
             const samples = buffer.getChannelData(0);
             const sampleRate = buffer.sampleRate;
 
             // Generate template chirp for cross-correlation
             const templateLength = Math.round(chirpDuration * sampleRate);
             const template = new Float32Array(templateLength);
-            const freq = 200 + (i * 100);
             for (let j = 0; j < templateLength; j++) {
               template[j] = Math.sin(2 * Math.PI * freq * j / sampleRate);
             }
@@ -151,10 +157,19 @@
             const delay = (echoStart - chirpStart) / sampleRate;
             const distance = (delay * speedOfSound) / 2;
             if (distance >= 5 && distance <= 200) {
-              distances.push(distance.toFixed(2));
-            } else {
-              distances.push('N/A');
+              allDistances[freqIndex].push(distance);
             }
+          });
+
+          // Compute averages and check for false positives (high variance)
+          const distances = allDistances.map((group, index) => {
+            if (group.length < repeatsPerFreq) return 'N/A'; // Not enough valid repeats
+            const avg = group.reduce((a, b) => a + b, 0) / group.length;
+            // Calculate standard deviation
+            const variance = group.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / group.length;
+            const stdDev = Math.sqrt(variance);
+            if (stdDev > 5) return 'Unreliable'; // Weed out false positives via high variance
+            return avg.toFixed(2);
           });
 
           // Display results
