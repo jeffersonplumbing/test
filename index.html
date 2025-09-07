@@ -41,19 +41,20 @@
     <p id="status">Ready</p>
     <h2>Results:</h2>
     <div id="results">
-        <p id="distance1">Chirp 1: --</p>
-        <p id="distance2">Chirp 2: --</p>
-        <p id="distance3">Chirp 3: --</p>
-        <p id="distance4">Chirp 4: --</p>
-        <p id="distance5">Chirp 5: --</p>
+        <p id="distance1">Measurement 1: --</p>
+        <p id="distance2">Measurement 2: --</p>
+        <p id="distance3">Measurement 3: --</p>
+        <p id="distance4">Measurement 4: --</p>
+        <p id="distance5">Measurement 5: --</p>
     </div>
-    <button id="startButton" onclick="startSonar()">Send Chirps</button>
+    <button id="startButton" onclick="startSonar()">Measure Distance to Water</button>
 
     <script>
         const sampleRate = 44100;
         const startFreq = 200;
         const endFreq = 600;
         const chirpDuration = 0.01;
+        const recordDuration = 0.5;
         const chirpGap = 0.5;
         const speedOfSound = 343;
         const metersToFeet = 3.28084;
@@ -61,6 +62,7 @@
         let mediaRecorder;
         let recordedChunks = [];
         let isPermissionGranted = false;
+        let chirpBuffer;
 
         async function requestMicPermission() {
             console.log('Requesting microphone permission...');
@@ -92,6 +94,75 @@
             return buffer;
         }
 
+        async function processSingleChirp(chirpIndex, stream) {
+            return new Promise((resolve) => {
+                recordedChunks = [];
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) recordedChunks.push(e.data);
+                    console.log(`Measurement ${chirpIndex} recorded chunk received, size: ${e.data.size}`);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    console.log(`Processing measurement ${chirpIndex}...`);
+                    try {
+                        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                        const recordedData = audioBuffer.getChannelData(0);
+                        console.log(`Measurement ${chirpIndex} recorded data length: ${recordedData.length}`);
+
+                        const chirpData = chirpBuffer.getChannelData(0);
+                        const correlationLength = recordedData.length + chirpData.length - 1;
+                        const correlation = new Float32Array(correlationLength).fill(0);
+                        for (let i = 0; i < recordedData.length; i++) {
+                            for (let j = 0; j < chirpData.length; j++) {
+                                if (i + j < correlationLength) {
+                                    correlation[i + j] += recordedData[i] * chirpData[j];
+                                }
+                            }
+                        }
+
+                        const ignoreSamples = Math.floor(chirpDuration * sampleRate) + 100;
+                        let maxValue = -Infinity;
+                        let maxIndex = 0;
+                        for (let i = ignoreSamples; i < correlation.length; i++) {
+                            if (correlation[i] > maxValue) {
+                                maxValue = correlation[i];
+                                maxIndex = i;
+                            }
+                        }
+
+                        if (maxValue > 0.1) {
+                            const rtt = maxIndex / sampleRate;
+                            const distanceMeters = (speedOfSound * rtt) / 2;
+                            const distanceFeet = distanceMeters * metersToFeet;
+                            document.getElementById(`distance${chirpIndex}`).textContent = `Measurement ${chirpIndex}: ${distanceFeet.toFixed(2)} feet`;
+                            console.log(`Measurement ${chirpIndex} distance: ${distanceFeet.toFixed(2)} feet`);
+                        } else {
+                            document.getElementById(`distance${chirpIndex}`).textContent = `Measurement ${chirpIndex}: No echo`;
+                            console.log(`Measurement ${chirpIndex}: No echo detected`);
+                        }
+                    } catch (err) {
+                        console.error(`Measurement ${chirpIndex} processing error:`, err);
+                        document.getElementById(`distance${chirpIndex}`).textContent = `Measurement ${chirpIndex}: Error`;
+                    }
+                    resolve();
+                };
+
+                mediaRecorder.start();
+                const source = audioContext.createBufferSource();
+                source.buffer = chirpBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+                console.log(`Playing measurement ${chirpIndex}`);
+
+                setTimeout(() => {
+                    mediaRecorder.stop();
+                }, recordDuration * 1000);
+            });
+        }
+
         async function startSonar() {
             console.log('startSonar called');
             if (!isPermissionGranted) {
@@ -99,15 +170,16 @@
                 if (!isPermissionGranted) return;
             }
 
-            document.getElementById('status').textContent = 'Active Test';
+            document.getElementById('status').textContent = 'Preparing...';
             document.getElementById('startButton').disabled = true;
             for (let i = 1; i <= 5; i++) {
-                document.getElementById(`distance${i}`).textContent = `Chirp ${i}: --`;
+                document.getElementById(`distance${i}`).textContent = `Measurement ${i}: --`;
             }
 
             try {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
                 console.log('AudioContext created with sample rate:', sampleRate);
+                chirpBuffer = generateChirp();
             } catch (err) {
                 console.error('AudioContext error:', err);
                 document.getElementById('status').textContent = 'AudioContext creation failed';
@@ -115,99 +187,21 @@
                 return;
             }
 
-            const chirpBuffer = generateChirp();
+            // 3-second delay before starting chirps
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
-            recordedChunks = [];
 
-            mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) recordedChunks.push(e.data);
-                console.log('Recorded chunk received, size:', e.data.size);
-            };
-
-            mediaRecorder.onstop = () => processRecording(chirpBuffer);
-
-            console.log('Starting recording...');
-            mediaRecorder.start();
-
-            // Play 5 chirps with 0.5s gaps
-            for (let i = 0; i < 5; i++) {
-                const source = audioContext.createBufferSource();
-                source.buffer = chirpBuffer;
-                source.connect(audioContext.destination);
-                source.start(audioContext.currentTime + i * (chirpDuration + chirpGap));
-                console.log(`Playing chirp ${i + 1} at ${audioContext.currentTime + i * (chirpDuration + chirpGap)}`);
-            }
-
-            // Stop recording after 5 seconds
-            setTimeout(() => {
-                console.log('Stopping recording...');
-                mediaRecorder.stop();
-                stream.getTracks().forEach(track => track.stop());
-            }, 5000);
-        }
-
-        async function processRecording(chirpBuffer) {
-            console.log('Processing recording...');
-            document.getElementById('status').textContent = 'Processing...';
-
-            try {
-                const blob = new Blob(recordedChunks, { type: 'audio/webm' });
-                const arrayBuffer = await blob.arrayBuffer();
-                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-                const recordedData = audioBuffer.getChannelData(0);
-                console.log('Recorded data length:', recordedData.length);
-
-                const chirpData = chirpBuffer.getChannelData(0);
-                const chirpLength = chirpData.length;
-                const samplesPerChirp = Math.floor((chirpDuration + chirpGap) * sampleRate);
-
-                for (let chirpIndex = 0; chirpIndex < 5; chirpIndex++) {
-                    const startSample = Math.floor(chirpIndex * samplesPerChirp);
-                    const endSample = Math.min(startSample + samplesPerChirp + chirpLength, recordedData.length);
-                    const segment = recordedData.slice(startSample, endSample);
-
-                    const correlationLength = segment.length + chirpData.length - 1;
-                    const correlation = new Float32Array(correlationLength).fill(0);
-                    for (let i = 0; i < segment.length; i++) {
-                        for (let j = 0; j < chirpData.length; j++) {
-                            if (i + j < correlationLength) {
-                                correlation[i + j] += segment[i] * chirpData[j];
-                            }
-                        }
-                    }
-
-                    const ignoreSamples = Math.floor(chirpDuration * sampleRate) + 100;
-                    let maxValue = -Infinity;
-                    let maxIndex = 0;
-                    for (let i = ignoreSamples; i < correlation.length; i++) {
-                        if (correlation[i] > maxValue) {
-                            maxValue = correlation[i];
-                            maxIndex = i;
-                        }
-                    }
-
-                    if (maxValue > 0.1) {
-                        const rtt = (startSample + maxIndex) / sampleRate;
-                        const distanceMeters = (speedOfSound * rtt) / 2;
-                        const distanceFeet = distanceMeters * metersToFeet;
-                        document.getElementById(`distance${chirpIndex + 1}`).textContent = `Chirp ${chirpIndex + 1}: ${distanceFeet.toFixed(2)} feet`;
-                        console.log(`Chirp ${chirpIndex + 1} distance: ${distanceFeet.toFixed(2)} feet`);
-                    } else {
-                        document.getElementById(`distance${chirpIndex + 1}`).textContent = `Chirp ${chirpIndex + 1}: No echo`;
-                        console.log(`Chirp ${chirpIndex + 1}: No echo detected`);
-                    }
-                }
-
-                document.getElementById('status').textContent = 'Processing complete';
-            } catch (err) {
-                console.error('Processing error:', err);
-                document.getElementById('status').textContent = 'Processing failed';
-                for (let i = 1; i <= 5; i++) {
-                    document.getElementById(`distance${i}`).textContent = `Chirp ${i}: Error`;
+            for (let chirpIndex = 1; chirpIndex <= 5; chirpIndex++) {
+                document.getElementById('status').textContent = `Active Test (Measurement ${chirpIndex})`;
+                await processSingleChirp(chirpIndex, stream);
+                if (chirpIndex < 5) {
+                    await new Promise(resolve => setTimeout(resolve, chirpGap * 1000));
                 }
             }
 
+            stream.getTracks().forEach(track => track.stop());
+            document.getElementById('status').textContent = 'Processing complete';
             document.getElementById('startButton').disabled = false;
             audioContext.close();
         }
