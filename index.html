@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sonar Web App V4</title>
+    <title>Sonar Web App</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -23,6 +23,7 @@
             border: none;
             border-radius: 5px;
             cursor: pointer;
+            margin: 10px;
         }
         button:disabled {
             background-color: #6c757d;
@@ -48,30 +49,32 @@
         <p id="distance5">Measurement 5: --</p>
     </div>
     <button id="startButton" onclick="startSonar()">Measure Distance to Water</button>
+    <button id="calibrateButton" onclick="calibrateTo10()">Calibrate to 10 ft</button>
+    <button id="resetCalibrationButton" onclick="resetCalibration()">Reset Calibration</button>
 
     <script>
         const sampleRate = 44100;
-        const startFreq = 200;
-        const endFreq = 600;
-        const chirpDuration = 0.01;
-        const recordDuration = 0.5;
+        const startFreq = 4000;
+        const endFreq = 8000;
+        const chirpDuration = 0.05;
+        const recordDuration = 1.0;
         const chirpGap = 0.5;
         const speedOfSound = 343;
         const metersToFeet = 3.28084;
+
         let audioContext;
         let mediaRecorder;
         let recordedChunks = [];
         let isPermissionGranted = false;
         let chirpBuffer;
+        let calibrationOffset = 0;
 
         async function requestMicPermission() {
-            console.log('Requesting microphone permission...');
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                 isPermissionGranted = true;
                 document.getElementById('startButton').disabled = false;
                 document.getElementById('status').textContent = 'Permission granted';
-                console.log('Microphone permission granted');
                 return stream;
             } catch (err) {
                 document.getElementById('status').textContent = 'Microphone permission denied';
@@ -81,7 +84,6 @@
         }
 
         function generateChirp() {
-            console.log('Generating chirp...');
             const frameCount = Math.floor(chirpDuration * sampleRate);
             const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
             const data = buffer.getChannelData(0);
@@ -100,17 +102,14 @@
                 mediaRecorder = new MediaRecorder(stream);
                 mediaRecorder.ondataavailable = (e) => {
                     if (e.data.size > 0) recordedChunks.push(e.data);
-                    console.log(`Measurement ${chirpIndex} recorded chunk received, size: ${e.data.size}`);
                 };
 
                 mediaRecorder.onstop = async () => {
-                    console.log(`Processing measurement ${chirpIndex}...`);
                     try {
                         const blob = new Blob(recordedChunks, { type: 'audio/webm' });
                         const arrayBuffer = await blob.arrayBuffer();
                         const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                         const recordedData = audioBuffer.getChannelData(0);
-                        console.log(`Measurement ${chirpIndex} recorded data length: ${recordedData.length}`);
 
                         const chirpData = chirpBuffer.getChannelData(0);
                         const correlationLength = recordedData.length + chirpData.length - 1;
@@ -123,7 +122,7 @@
                             }
                         }
 
-                        const ignoreSamples = Math.floor(chirpDuration * sampleRate) + 100;
+                        const ignoreSamples = Math.floor(chirpDuration * sampleRate) + 200;
                         let maxValue = -Infinity;
                         let maxIndex = 0;
                         for (let i = ignoreSamples; i < correlation.length; i++) {
@@ -133,18 +132,19 @@
                             }
                         }
 
-                        if (maxValue > 0.1) {
+                        if (maxValue > 0.05) {
                             const rtt = maxIndex / sampleRate;
                             const distanceMeters = (speedOfSound * rtt) / 2;
                             const distanceFeet = distanceMeters * metersToFeet;
-                            document.getElementById(`distance${chirpIndex}`).textContent = `Measurement ${chirpIndex}: ${distanceFeet.toFixed(2)} feet`;
-                            console.log(`Measurement ${chirpIndex} distance: ${distanceFeet.toFixed(2)} feet`);
+                            const adjustedFeet = distanceFeet - calibrationOffset;
+
+                            document.getElementById(`distance${chirpIndex}`).textContent =
+                                `Measurement ${chirpIndex}: ${adjustedFeet.toFixed(2)} feet (Raw: ${distanceFeet.toFixed(2)} ft)`;
                         } else {
                             document.getElementById(`distance${chirpIndex}`).textContent = `Measurement ${chirpIndex}: No echo`;
-                            console.log(`Measurement ${chirpIndex}: No echo detected`);
                         }
                     } catch (err) {
-                        console.error(`Measurement ${chirpIndex} processing error:`, err);
+                        console.error(`Measurement ${chirpIndex} error:`, err);
                         document.getElementById(`distance${chirpIndex}`).textContent = `Measurement ${chirpIndex}: Error`;
                     }
                     resolve();
@@ -155,7 +155,6 @@
                 source.buffer = chirpBuffer;
                 source.connect(audioContext.destination);
                 source.start();
-                console.log(`Playing measurement ${chirpIndex}`);
 
                 setTimeout(() => {
                     mediaRecorder.stop();
@@ -164,7 +163,6 @@
         }
 
         async function startSonar() {
-            console.log('startSonar called');
             if (!isPermissionGranted) {
                 await requestMicPermission();
                 if (!isPermissionGranted) return;
@@ -178,7 +176,6 @@
 
             try {
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
-                console.log('AudioContext created with sample rate:', sampleRate);
                 chirpBuffer = generateChirp();
             } catch (err) {
                 console.error('AudioContext error:', err);
@@ -187,7 +184,6 @@
                 return;
             }
 
-            // 3-second delay before starting chirps
             await new Promise(resolve => setTimeout(resolve, 3000));
 
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -206,7 +202,24 @@
             audioContext.close();
         }
 
-        // Request permission on page load
+        function calibrateTo10() {
+            const latestReadingElement = document.getElementById("distance1");
+            const match = latestReadingElement.textContent.match(/Raw: ([\d.]+) ft/);
+
+            if (match) {
+                const rawValue = parseFloat(match[1]);
+                calibrationOffset = rawValue - 10;
+                alert(`Calibration set: Future readings will subtract ${calibrationOffset.toFixed(2)} ft.`);
+            } else {
+                alert("No valid raw reading found for calibration.");
+            }
+        }
+
+        function resetCalibration() {
+            calibrationOffset = 0;
+            alert("Calibration has been reset. Now using raw measurements.");
+        }
+
         requestMicPermission();
     </script>
 </body>
