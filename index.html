@@ -1,0 +1,232 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sonar Web App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 18px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #6c757d;
+        }
+        p {
+            font-size: 20px;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Sonar Web App</h1>
+    <p id="status">Ready</p>
+    <p id="distance">Distance: --</p>
+    <button id="startButton" onclick="startSonar()">Send Pulse</button>
+
+    <script>
+        const sampleRate = 44100;
+        const frequency = 18000;
+        const pulseDuration = 0.01;
+        const speedOfSound = 343;
+        let audioContext;
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isPermissionGranted = false;
+
+        async function requestMicPermission() {
+            console.log('Requesting microphone permission...');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                isPermissionGranted = true;
+                document.getElementById('startButton').disabled = false;
+                document.getElementById('status').textContent = 'Permission granted';
+                console.log('Microphone permission granted');
+                return stream;
+            } catch (err) {
+                document.getElementById('status').textContent = 'Microphone permission denied';
+                document.getElementById('startButton').disabled = true;
+                console.error('Permission error:', err.name, err.message);
+            }
+        }
+
+        function generatePulse() {
+            console.log('Generating pulse...');
+            const frameCount = Math.floor(pulseDuration * sampleRate);
+            const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < frameCount; i++) {
+                data[i] = 0.5 * Math.sin(2 * Math.PI * frequency * i / sampleRate);
+            }
+            return buffer;
+        }
+
+        async function startSonar() {
+            console.log('startSonar called');
+            if (!isPermissionGranted) {
+                await requestMicPermission();
+                if (!isPermissionGranted) return;
+            }
+
+            document.getElementById('status').textContent = 'Emitting pulse...';
+            document.getElementById('startButton').disabled = true;
+
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+                console.log('AudioContext created with sample rate:', sampleRate);
+            } catch (err) {
+                console.error('AudioContext error:', err);
+                document.getElementById('status').textContent = 'AudioContext creation failed';
+                document.getElementById('startButton').disabled = false;
+                return;
+            }
+
+            const pulseBuffer = generatePulse();
+            const source = audioContext.createBufferSource();
+            source.buffer = pulseBuffer;
+            source.connect(audioContext.destination);
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                recordedChunks = [];
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) recordedChunks.push(e.data);
+                    console.log('Recorded chunk received, size:', e.data.size);
+                };
+
+                mediaRecorder.onstop = processRecording;
+
+                console.log('Starting recording...');
+                mediaRecorder.start();
+                console.log('Playing pulse...');
+                source.start();
+
+                setTimeout(() => {
+                    console.log('Stopping recording...');
+                    mediaRecorder.stop();
+                    stream.getTracks().forEach(track => track.stop());
+                }, 1000);
+            } catch (err) {
+                console.error('Recording setup error:', err);
+                document.getElementById('status').textContent = 'Recording setup failed';
+                document.getElementById('startButton').disabled = false;
+                audioContext.close();
+            }
+        }
+
+        async function processRecording() {
+            console.log('Processing recording...');
+            document.getElementById('status').textContent = 'Processing...';
+
+            try {
+                const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+                const arrayBuffer = await blob.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const recordedData = audioBuffer.getChannelData(0);
+                console.log('Recorded data length:', recordedData.length);
+
+                const pulseBuffer = generatePulse();
+                const pulseData = pulseBuffer.getChannelData(0);
+
+                const correlationLength = recordedData.length + pulseData.length - 1;
+                const correlation = new Float32Array(correlationLength).fill(0);
+                for (let i = 0; i < recordedData.length; i++) {
+                    for (let j = 0; j < pulseData.length; j++) {
+                        if (i + j < correlationLength) {
+                            correlation[i + j] += recordedData[i] * pulseData[j];
+                        }
+                    }
+                }
+
+                const ignoreSamples = Math.floor(pulseDuration * sampleRate) + 100;
+                let maxValue = -Infinity;
+                let maxIndex = 0;
+                for (let i = ignoreSamples; i < correlation.length; i++) {
+                    if (correlation[i] > maxValue) {
+                        maxValue = correlation[i];
+                        maxIndex = i;
+                    }
+                }
+
+                if (maxValue > 0.1) {
+                    const rtt = maxIndex / sampleRate;
+                    const distance = (speedOfSound * rtt) / 2;
+                    document.getElementById('distance').textContent = `Distance: ${distance.toFixed(2)} meters`;
+                    document.getElementById('status').textContent = 'Echo detected';
+                    console.log('Echo detected, distance:', distance);
+                } else {
+                    document.getElementById('distance').textContent = 'Distance: --';
+                    document.getElementById('status').textContent = 'No echo detected';
+                    console.log('No echo detected');
+                }
+            } catch (err) {
+                console.error('Processing error:', err);
+                document.getElementById('status').textContent = 'Processing failed';
+                document.getElementById('distance').textContent = 'Distance: --';
+            }
+
+            document.getElementById('startButton').disabled = false;
+            audioContext.close();
+        }
+
+        // Request permission on page load
+        requestMicPermission();
+    </script>
+</body>
+</html>
