@@ -5,53 +5,262 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sonar Web App</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        button { margin-left: 10px; }
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 18px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 10px;
+        }
+        button:disabled {
+            background-color: #6c757d;
+        }
+        p, h1, h2 {
+            font-size: 20px;
+            margin: 10px;
+        }
+        #results {
+            text-align: left;
+        }
     </style>
 </head>
 <body>
-    <h1>Sonar Web App Fixed?</h1>
-    <p>Ready</p>
+    <h1>Sonar Web App</h1>
+    <p id="status">Ready</p>
     <h2>Results:</h2>
-    <p>Measurement 1: <span id="measurement-1">--</span> <button onclick="runTest(1)">Run Test</button></p>
-    <p>Measurement 2: <span id="measurement-2">--</span> <button onclick="runTest(2)">Run Test</button></p>
-    <p>Measurement 3: <span id="measurement-3">--</span> <button onclick="runTest(3)">Run Test</button></p>
-    <p>Measurement 4: <span id="measurement-4">--</span> <button onclick="runTest(4)">Run Test</button></p>
-    <p>Measurement 5: <span id="measurement-5">--</span> <button onclick="runTest(5)">Run Test</button></p>
+    <div id="results">
+        <p id="distance1">Measurement 1: --</p>
+        <p id="distance2">Measurement 2: --</p>
+        <p id="distance3">Measurement 3: --</p>
+        <p id="distance4">Measurement 4: --</p>
+        <p id="distance5">Measurement 5: --</p>
+    </div>
+    <button id="startButton" onclick="startSonar()" disabled>Measure Distance to Water</button>
+    <button id="calibrateButton" onclick="calibrateTo10()">Calibrate to 10 ft</button>
+    <button id="resetCalibrationButton" onclick="resetCalibration()">Reset Calibration</button>
 
     <script>
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const sampleRate = 44100;
+        const frequencies = [100, 500, 2000, 8000]; // Wide range of frequencies for pulses
+        const pulseDuration = 0.05; // Duration of each pulse in seconds
+        const recordDuration = 1.0; // Duration to record after each pulse
+        const pulseGap = 0.3; // Gap between pulses in a measurement
+        const speedOfSound = 343; // Speed of sound in air (m/s)
+        const metersToFeet = 3.28084; // Conversion factor
+        const pulseDelay = 0.5; // Delay between measurements
 
-        function playPulse(frequency, duration = 0.1) {
-            const oscillator = ctx.createOscillator();
-            oscillator.type = 'sine'; // Sine wave for clean pulse sound
-            oscillator.frequency.setValueAtTime(frequency, ctx.currentTime);
-            oscillator.connect(ctx.destination);
-            oscillator.start();
-            oscillator.stop(ctx.currentTime + duration);
+        let audioContext;
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isPermissionGranted = false;
+        let pulseBuffers = [];
+        let calibrationOffset = 0;
+        let stream = null;
+
+        async function requestMicPermission() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                isPermissionGranted = true;
+                document.getElementById('status').textContent = 'Permission granted';
+                document.getElementById('startButton').disabled = false;
+                // Initialize AudioContext after permission to avoid suspension
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+                // Resume AudioContext if suspended
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+                return stream;
+            } catch (err) {
+                let errorMessage = 'Microphone permission denied';
+                if (err.name === 'NotAllowedError') {
+                    errorMessage = 'Microphone access denied by user. Please allow microphone access in browser settings.';
+                } else if (err.name === 'NotFoundError') {
+                    errorMessage = 'No microphone found. Please ensure a microphone is connected.';
+                } else {
+                    errorMessage = `Microphone permission error: ${err.name} - ${err.message}`;
+                }
+                document.getElementById('status').textContent = errorMessage;
+                document.getElementById('startButton').disabled = true;
+                console.error('Permission error:', err);
+                return null;
+            }
         }
 
-        function runTest(testNumber) {
-            const frequencies = [100, 500, 2000, 8000]; // Very low to high frequencies in Hz
-            const results = []; // To store simulated results (e.g., echo times)
+        function generatePulse(frequency) {
+            const frameCount = Math.floor(pulseDuration * sampleRate);
+            const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < frameCount; i++) {
+                const t = i / sampleRate;
+                data[i] = 0.5 * Math.sin(2 * Math.PI * frequency * t);
+            }
+            return buffer;
+        }
 
-            frequencies.forEach((freq, index) => {
-                setTimeout(() => {
-                    playPulse(freq);
-                    // Simulate a measurement result (e.g., random echo time in ms)
-                    const simulatedResult = Math.floor(Math.random() * 100) + 50;
-                    results.push(`${freq} Hz: ${simulatedResult} ms`);
-                    // If last pulse, update the UI
-                    if (index === frequencies.length - 1) {
-                        updateResults(testNumber, results.join(' | '));
+        async function processSinglePulse(frequency, pulseBuffer, stream) {
+            return new Promise((resolve) => {
+                recordedChunks = [];
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) recordedChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    try {
+                        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+                        const arrayBuffer = await blob.arrayBuffer();
+                        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                        const recordedData = audioBuffer.getChannelData(0);
+                        const pulseData = pulseBuffer.getChannelData(0);
+
+                        const correlationLength = recordedData.length + pulseData.length - 1;
+                        const correlation = new Float32Array(correlationLength).fill(0);
+                        for (let i = 0; i < recordedData.length; i++) {
+                            for (let j = 0; j < pulseData.length; j++) {
+                                if (i + j < correlationLength) {
+                                    correlation[i + j] += recordedData[i] * pulseData[j];
+                                }
+                            }
+                        }
+
+                        const ignoreSamples = Math.floor(pulseDuration * sampleRate) + 200;
+                        let maxValue = -Infinity;
+                        let maxIndex = 0;
+                        for (let i = ignoreSamples; i < correlation.length; i++) {
+                            if (correlation[i] > maxValue) {
+                                maxValue = correlation[i];
+                                maxIndex = i;
+                            }
+                        }
+
+                        if (maxValue > 0.05) {
+                            const rtt = maxIndex / sampleRate;
+                            const distanceMeters = (speedOfSound * rtt) / 2;
+                            const distanceFeet = distanceMeters * metersToFeet;
+                            resolve(distanceFeet);
+                        } else {
+                            resolve(null); // No valid echo detected
+                        }
+                    } catch (err) {
+                        console.error(`Pulse ${frequency} Hz error:`, err);
+                        resolve(null);
                     }
-                }, index * 300); // 300ms delay between pulses for clarity
+                };
+
+                const source = audioContext.createBufferSource();
+                source.buffer = pulseBuffer;
+                source.connect(audioContext.destination);
+                source.start();
+                mediaRecorder.start();
+
+                setTimeout(() => {
+                    mediaRecorder.stop();
+                }, recordDuration * 1000);
             });
         }
 
-        function updateResults(testNumber, resultText) {
-            document.getElementById(`measurement-${testNumber}`).innerText = resultText;
+        async function processMeasurement(chirpIndex, stream) {
+            const distances = [];
+            for (let i = 0; i < frequencies.length; i++) {
+                const distance = await processSinglePulse(frequencies[i], pulseBuffers[i], stream);
+                if (distance !== null) {
+                    distances.push(distance);
+                }
+                if (i < frequencies.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, pulseGap * 1000));
+                }
+            }
+
+            if (distances.length > 0) {
+                const avgDistance = distances.reduce((sum, d) => sum + d, 0) / distances.length;
+                const adjustedDistance = avgDistance - calibrationOffset;
+                document.getElementById(`distance${chirpIndex}`).textContent =
+                    `Measurement ${chirpIndex}: ${adjustedDistance.toFixed(2)} feet (Raw: ${avgDistance.toFixed(2)} ft)`;
+            } else {
+                document.getElementById(`distance${chirpIndex}`).textContent =
+                    `Measurement ${chirpIndex}: No echo`;
+            }
         }
+
+        async function startSonar() {
+            if (!isPermissionGranted || !stream) {
+                const permissionStream = await requestMicPermission();
+                if (!permissionStream) return;
+            }
+
+            document.getElementById('status').textContent = 'Preparing...';
+            document.getElementById('startButton').disabled = true;
+            for (let i = 1; i <= 5; i++) {
+                document.getElementById(`distance${i}`).textContent = `Measurement ${i}: --`;
+            }
+
+            try {
+                // Ensure AudioContext is initialized
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+                    if (audioContext.state === 'suspended') {
+                        await audioContext.resume();
+                    }
+                }
+                pulseBuffers = frequencies.map(freq => generatePulse(freq));
+            } catch (err) {
+                console.error('AudioContext error:', err);
+                document.getElementById('status').textContent = 'AudioContext creation failed';
+                document.getElementById('startButton').disabled = false;
+                return;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            for (let chirpIndex = 1; chirpIndex <= 5; chirpIndex++) {
+                document.getElementById('status').textContent = `Active Test (Measurement ${chirpIndex})`;
+                await processMeasurement(chirpIndex, stream);
+                if (chirpIndex < 5) {
+                    await new Promise(resolve => setTimeout(resolve, pulseDelay * 1000));
+                }
+            }
+
+            stream.getTracks().forEach(track => track.stop());
+            stream = null; // Reset stream to allow re-requesting permission if needed
+            document.getElementById('status').textContent = 'Processing complete';
+            document.getElementById('startButton').disabled = false;
+            audioContext.close();
+            audioContext = null; // Reset AudioContext
+        }
+
+        function calibrateTo10() {
+            const latestReadingElement = document.getElementById("distance1");
+            const match = latestReadingElement.textContent.match(/Raw: ([\d.]+) ft/);
+
+            if (match) {
+                const rawValue = parseFloat(match[1]);
+                calibrationOffset = rawValue - 10;
+                alert(`Calibration set: Future readings will subtract ${calibrationOffset.toFixed(2)} ft.`);
+            } else {
+                alert("No valid raw reading found for calibration.");
+            }
+        }
+
+        function resetCalibration() {
+            calibrationOffset = 0;
+            alert("Calibration has been reset. Now using raw measurements.");
+        }
+
+        // Initial permission request
+        requestMicPermission();
     </script>
 </body>
 </html>
