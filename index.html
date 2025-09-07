@@ -4,105 +4,166 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Sonar App (5-200 ft)</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      background-color: #f0f0f0;
+    }
+    h1 {
+      font-size: 2em;
+      color: #333;
+      text-align: center;
+    }
+    button {
+      font-size: 1.5em;
+      padding: 15px 30px;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      margin: 20px;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    #results {
+      font-size: 1.2em;
+      color: #333;
+      text-align: center;
+      max-width: 80%;
+      word-wrap: break-word;
+    }
+  </style>
 </head>
 <body>
   <h1>Sonar Distance Measurement</h1>
   <button onclick="startSonar()">Start Sonar</button>
-  <div id="results">Results will appear here...</div>
+  <div id="results">Click "Start Sonar" to begin...</div>
 
   <script>
     async function startSonar() {
-      // Initialize AudioContext
-      const audioContext = new AudioContext({ sampleRate: 44100 });
-      const chirpDuration = 0.05; // 50ms chirp
-      const chirpInterval = 0.5; // 0.5s between chirps
-      const numChirps = 5;
-      const recordingDuration = 0.5; // Enough for 200ft echo (~356ms)
-      const speedOfSound = 1125; // ft/s
-      let recordings = [];
+      try {
+        const audioContext = new AudioContext({ sampleRate: 44100 });
+        const chirpDuration = 0.1; // 100ms chirp for clearer waveform
+        const chirpInterval = 0.5; // 0.5s between chirps
+        const numChirps = 5;
+        const recordingDuration = 0.5; // Enough for 200ft (~356ms)
+        const speedOfSound = 1125; // ft/s
+        let recordings = [];
 
-      // Get microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const micSource = audioContext.createMediaStreamSource(stream);
+        // Get microphone access
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const micSource = audioContext.createMediaStreamSource(stream);
 
-      // Set up MediaRecorder
-      const mediaRecorder = new MediaRecorder(stream);
-      let chunks = [];
-      mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-      mediaRecorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
-        chunks = [];
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        recordings.push(audioBuffer);
-        if (recordings.length === numChirps) {
-          analyzeRecordings(recordings);
+        // Set up MediaRecorder
+        const mediaRecorder = new MediaRecorder(stream);
+        let chunks = [];
+        mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(chunks, { type: 'audio/webm' });
+          chunks = [];
+          const arrayBuffer = await blob.arrayBuffer();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          recordings.push(audioBuffer);
+          if (recordings.length === numChirps) {
+            await audioContext.close();
+            stream.getTracks().forEach(track => track.stop());
+            analyzeRecordings(recordings);
+          }
+        };
+
+        // Generate and play chirps
+        document.getElementById('results').innerText = 'Recording...';
+        for (let i = 0; i < numChirps; i++) {
+          const oscillator = audioContext.createOscillator();
+          oscillator.type = 'sine';
+          oscillator.frequency.setValueAtTime(200 + (i * 100), audioContext.currentTime); // 200Hz to 600Hz
+          oscillator.connect(audioContext.destination);
+          oscillator.start(audioContext.currentTime + i * chirpInterval);
+          oscillator.stop(audioContext.currentTime + i * chirpInterval + chirpDuration);
+
+          // Record each chirp
+          mediaRecorder.start();
+          await new Promise((resolve) => setTimeout(resolve, recordingDuration * 1000));
+          mediaRecorder.stop();
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
-      };
 
-      // Generate and play chirps
-      document.getElementById('results').innerText = 'Recording...';
-      for (let i = 0; i < numChirps; i++) {
-        const oscillator = audioContext.createOscillator();
-        oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(200 + (i * 100), audioContext.currentTime); // 200Hz to 600Hz
-        oscillator.connect(audioContext.destination);
-        oscillator.start(audioContext.currentTime + i * chirpInterval);
-        oscillator.stop(audioContext.currentTime + i * chirpInterval + chirpDuration);
-
-        // Record each chirp
-        mediaRecorder.start();
-        await new Promise((resolve) => setTimeout(resolve, recordingDuration * 1000));
-        mediaRecorder.stop();
-        await new Promise((resolve) => setTimeout(resolve, 100)); // Buffer for stop
-      }
-
-      // Analyze recordings
-      function analyzeRecordings(buffers) {
-        const distances = [];
-        buffers.forEach((buffer, i) => {
-          const samples = buffer.getChannelData(0);
-          const sampleRate = buffer.sampleRate;
-
-          // Find chirp peak (high amplitude at start)
-          let chirpStart = 0;
-          for (let j = 0; j < samples.length; j++) {
-            if (Math.abs(samples[j]) > 0.1) { // Adjust threshold based on testing
-              chirpStart = j;
-              break;
+        // Cross-correlation for echo detection
+        function crossCorrelate(signal, template) {
+          const result = new Float32Array(signal.length - template.length + 1);
+          for (let i = 0; i < result.length; i++) {
+            let sum = 0;
+            for (let j = 0; j < template.length; j++) {
+              sum += signal[i + j] * template[j];
             }
+            result[i] = sum;
           }
+          return result;
+        }
 
-          // Find echo peak (next high amplitude after chirp)
-          const minEchoSamples = Math.round(0.00889 * sampleRate); // 5ft ~8.89ms
-          const maxEchoSamples = Math.round(0.3556 * sampleRate); // 200ft ~356ms
-          let echoStart = chirpStart + minEchoSamples;
-          for (let j = chirpStart + minEchoSamples; j < Math.min(samples.length, chirpStart + maxEchoSamples); j++) {
-            if (Math.abs(samples[j]) > 0.05) { // Lower threshold for echo
-              echoStart = j;
-              break;
+        // Analyze recordings
+        function analyzeRecordings(buffers) {
+          const distances = [];
+          buffers.forEach((buffer, i) => {
+            const samples = buffer.getChannelData(0);
+            const sampleRate = buffer.sampleRate;
+
+            // Generate template chirp for cross-correlation
+            const templateLength = Math.round(chirpDuration * sampleRate);
+            const template = new Float32Array(templateLength);
+            const freq = 200 + (i * 100);
+            for (let j = 0; j < templateLength; j++) {
+              template[j] = Math.sin(2 * Math.PI * freq * j / sampleRate);
             }
-          }
 
-          // Calculate distance
-          const delay = (echoStart - chirpStart) / sampleRate; // Seconds
-          const distance = (delay * speedOfSound) / 2; // Round-trip
-          if (distance >= 5 && distance <= 200) { // Validate range
-            distances.push(distance.toFixed(2));
-          } else {
-            distances.push('N/A'); // Out of range or no echo detected
-          }
-        });
+            // Cross-correlate to find chirp and echo
+            const correlation = crossCorrelate(samples, template);
+            let chirpStart = 0;
+            let maxCorr = 0;
+            for (let j = 0; j < correlation.length; j++) {
+              if (correlation[j] > maxCorr) {
+                maxCorr = correlation[j];
+                chirpStart = j;
+              }
+            }
 
-        // Display results
-        document.getElementById('results').innerText = `Distances (ft): ${distances.join(', ')}`;
+            // Find echo after chirp
+            const minEchoSamples = Math.round(0.00889 * sampleRate); // 5ft ~8.89ms
+            const maxEchoSamples = Math.round(0.3556 * sampleRate); // 200ft ~356ms
+            let echoStart = chirpStart + minEchoSamples;
+            maxCorr = 0;
+            for (let j = chirpStart + minEchoSamples; j < Math.min(correlation.length, chirpStart + maxEchoSamples); j++) {
+              if (correlation[j] > maxCorr) {
+                maxCorr = correlation[j];
+                echoStart = j;
+              }
+            }
+
+            // Calculate distance
+            const delay = (echoStart - chirpStart) / sampleRate;
+            const distance = (delay * speedOfSound) / 2;
+            if (distance >= 5 && distance <= 200) {
+              distances.push(distance.toFixed(2));
+            } else {
+              distances.push('N/A');
+            }
+          });
+
+          // Display results
+          document.getElementById('results').innerText = `Distances (ft): ${distances.join(', ')}`;
+        }
+      } catch (error) {
+        document.getElementById('results').innerText = `Error: ${error.message}. Ensure microphone access is granted.`;
       }
     }
-
-    // Error handling
-    window.onerror = (msg) => {
-      document.getElementById('results').innerText = `Error: ${msg}`;
-    };
   </script>
 </body>
 </html>
