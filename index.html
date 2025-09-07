@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sonar App (5-200 ft)</title>
+  <title>Sonar App V3 (5-200 ft)</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -37,13 +37,31 @@
       font-size: 1.2em;
       color: #333;
       text-align: center;
-      max-width: 80%;
+      max-width: 90%;
       word-wrap: break-word;
+    }
+    table {
+      border-collapse: collapse;
+      margin-top: 20px;
+      width: 100%;
+      max-width: 600px;
+    }
+    th, td {
+      border: 1px solid #333;
+      padding: 8px;
+      text-align: center;
+    }
+    th {
+      background-color: #007bff;
+      color: white;
+    }
+    .unreliable {
+      color: red;
     }
   </style>
 </head>
 <body>
-  <h1>Sonar Distance Measurement V1</h1>
+  <h1>Sonar Distance Measurement V3</h1>
   <button onclick="startSonar()">Start Sonar</button>
   <div id="results">Click "Start Sonar" to begin...</div>
 
@@ -51,21 +69,25 @@
     async function startSonar() {
       try {
         const audioContext = new AudioContext({ sampleRate: 44100 });
-        const chirpDuration = 0.05; // 50ms chirp (shortened)
+        const chirpDuration = 0.01; // 10ms chirp
         const chirpInterval = 0.5; // 0.5s between chirps
         const repeatsPerFreq = 4; // Repeat each tone 4 times per frequency
         const numFrequencies = 5;
         const numChirps = numFrequencies * repeatsPerFreq; // Total 20 chirps
-        const recordingDuration = 0.5; // Enough for 200ft (~356ms)
+        const recordingDuration = numChirps * chirpInterval; // ~10s
         const speedOfSound = 1125; // ft/s
-        const frequencies = [200, 500, 1000, 2000, 4000]; // Optimized wider range
-        let recordings = [];
+        const frequencies = [100, 1000, 4000, 8000, 12000]; // Include 8-16kHz range
 
         // Get microphone access
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const micSource = audioContext.createMediaStreamSource(stream);
 
-        // Set up MediaRecorder
+        // Boost volume for higher frequencies
+        const gainNode = audioContext.createGain();
+        gainNode.gain.setValueAtTime(2.0, audioContext.currentTime); // +6dB boost
+        gainNode.connect(audioContext.destination);
+
+        // Set up MediaRecorder for continuous recording
         const mediaRecorder = new MediaRecorder(stream);
         let chunks = [];
         mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
@@ -74,12 +96,9 @@
           chunks = [];
           const arrayBuffer = await blob.arrayBuffer();
           const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-          recordings.push(audioBuffer);
-          if (recordings.length === numChirps) {
-            await audioContext.close();
-            stream.getTracks().forEach(track => track.stop());
-            analyzeRecordings(recordings);
-          }
+          await audioContext.close();
+          stream.getTracks().forEach(track => track.stop());
+          analyzeRecordings(audioBuffer);
         };
 
         // Generate and play chirps
@@ -90,16 +109,15 @@
           const oscillator = audioContext.createOscillator();
           oscillator.type = 'sine';
           oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
-          oscillator.connect(audioContext.destination);
+          oscillator.connect(gainNode); // Apply gain for higher frequencies
           oscillator.start(audioContext.currentTime + i * chirpInterval);
           oscillator.stop(audioContext.currentTime + i * chirpInterval + chirpDuration);
-
-          // Record each chirp
-          mediaRecorder.start();
-          await new Promise((resolve) => setTimeout(resolve, recordingDuration * 1000));
-          mediaRecorder.stop();
-          await new Promise((resolve) => setTimeout(resolve, 100));
         }
+
+        // Start continuous recording
+        mediaRecorder.start();
+        await new Promise((resolve) => setTimeout(resolve, recordingDuration * 1000));
+        mediaRecorder.stop();
 
         // Cross-correlation for echo detection
         function crossCorrelate(signal, template) {
@@ -115,15 +133,21 @@
         }
 
         // Analyze recordings
-        function analyzeRecordings(buffers) {
+        function analyzeRecordings(audioBuffer) {
           const allDistances = Array(numFrequencies).fill().map(() => []); // Group by frequency
-          buffers.forEach((buffer, i) => {
+          const samples = audioBuffer.getChannelData(0);
+          const sampleRate = audioBuffer.sampleRate;
+
+          for (let i = 0; i < numChirps; i++) {
             const freqIndex = Math.floor(i / repeatsPerFreq);
             const freq = frequencies[freqIndex];
-            const samples = buffer.getChannelData(0);
-            const sampleRate = buffer.sampleRate;
 
-            // Generate template chirp for cross-correlation
+            // Extract segment for this chirp
+            const startSample = Math.round(i * chirpInterval * sampleRate);
+            const endSample = Math.min(samples.length, startSample + Math.round(0.5 * sampleRate)); // 0.5s window
+            const segment = samples.slice(startSample, endSample);
+
+            // Generate template chirp
             const templateLength = Math.round(chirpDuration * sampleRate);
             const template = new Float32Array(templateLength);
             for (let j = 0; j < templateLength; j++) {
@@ -131,7 +155,7 @@
             }
 
             // Cross-correlate to find chirp and echo
-            const correlation = crossCorrelate(samples, template);
+            const correlation = crossCorrelate(segment, template);
             let chirpStart = 0;
             let maxCorr = 0;
             for (let j = 0; j < correlation.length; j++) {
@@ -158,22 +182,42 @@
             const distance = (delay * speedOfSound) / 2;
             if (distance >= 5 && distance <= 200) {
               allDistances[freqIndex].push(distance);
+            } else {
+              allDistances[freqIndex].push(null); // Invalid distance
             }
-          });
+          }
 
-          // Compute averages and check for false positives (high variance)
-          const distances = allDistances.map((group, index) => {
-            if (group.length < repeatsPerFreq) return 'N/A'; // Not enough valid repeats
-            const avg = group.reduce((a, b) => a + b, 0) / group.length;
-            // Calculate standard deviation
-            const variance = group.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / group.length;
+          // Generate table output
+          let tableHtml = '<table><tr><th>Repeat</th>';
+          frequencies.forEach(freq => tableHtml += `<th>${freq} Hz</th>`);
+          tableHtml += '</tr>';
+
+          // Add rows for each repeat
+          for (let i = 0; i < repeatsPerFreq; i++) {
+            tableHtml += '<tr><td>' + (i + 1) + '</td>';
+            allDistances.forEach(group => {
+              const dist = group[i] !== null ? group[i].toFixed(2) : 'N/A';
+              tableHtml += `<td>${dist}</td>`;
+            });
+            tableHtml += '</tr>';
+          }
+
+          // Add averages and reliability
+          tableHtml += '<tr><td>Average</td>';
+          const averages = allDistances.map(group => {
+            const valid = group.filter(d => d !== null);
+            if (valid.length === 0) return 'N/A';
+            const avg = valid.reduce((a, b) => a + b, 0) / valid.length;
+            const variance = valid.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / valid.length;
             const stdDev = Math.sqrt(variance);
-            if (stdDev > 5) return 'Unreliable'; // Weed out false positives via high variance
-            return avg.toFixed(2);
+            const result = avg.toFixed(2);
+            return stdDev > 5 ? `${result} <span class="unreliable">(Unreliable)</span>` : result;
           });
+          averages.forEach(avg => tableHtml += `<td>${avg}</td>`);
+          tableHtml += '</tr></table>';
 
           // Display results
-          document.getElementById('results').innerText = `Distances (ft): ${distances.join(', ')}`;
+          document.getElementById('results').innerHTML = tableHtml;
         }
       } catch (error) {
         document.getElementById('results').innerText = `Error: ${error.message}. Ensure microphone access is granted.`;
