@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sonar App V3 (5-200 ft)</title>
+  <title>Sonar App V4 (5-200 ft)</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -45,6 +45,7 @@
       margin-top: 20px;
       width: 100%;
       max-width: 600px;
+      margin: 0 auto; /* Centers the table */
     }
     th, td {
       border: 1px solid #333;
@@ -61,7 +62,7 @@
   </style>
 </head>
 <body>
-  <h1>Sonar Distance Measurement V3</h1>
+  <h1>Sonar Distance Measurement V4</h1>
   <button onclick="startSonar()">Start Sonar</button>
   <div id="results">Click "Start Sonar" to begin...</div>
 
@@ -69,17 +70,17 @@
     async function startSonar() {
       try {
         const audioContext = new AudioContext({ sampleRate: 44100 });
-        const chirpDuration = 0.01; // 10ms chirp
+        const chirpDuration = 0.005; // 5ms chirp
         const chirpInterval = 0.5; // 0.5s between chirps
-        const repeatsPerFreq = 4; // Repeat each tone 4 times per frequency
+        const repeatsPerFreq = 4; // Repeat cycle 4 times
         const numFrequencies = 5;
         const numChirps = numFrequencies * repeatsPerFreq; // Total 20 chirps
         const recordingDuration = numChirps * chirpInterval; // ~10s
         const speedOfSound = 1125; // ft/s
-        const frequencies = [100, 1000, 4000, 8000, 12000]; // Include 8-16kHz range
+        const frequencies = [100, 1000, 4000, 8000, 12000]; // Lowest to highest
 
-        // Get microphone access
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Get microphone access with disabled noise suppression
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression: false, echoCancellation: false } });
         const micSource = audioContext.createMediaStreamSource(stream);
 
         // Boost volume for higher frequencies
@@ -101,15 +102,15 @@
           analyzeRecordings(audioBuffer);
         };
 
-        // Generate and play chirps
+        // Generate and play chirps in cycled order (lowest to highest, repeated)
         document.getElementById('results').innerText = 'Recording...';
         for (let i = 0; i < numChirps; i++) {
-          const freqIndex = Math.floor(i / repeatsPerFreq);
+          const freqIndex = i % numFrequencies;
           const freq = frequencies[freqIndex];
           const oscillator = audioContext.createOscillator();
           oscillator.type = 'sine';
           oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
-          oscillator.connect(gainNode); // Apply gain for higher frequencies
+          oscillator.connect(gainNode); // Apply gain
           oscillator.start(audioContext.currentTime + i * chirpInterval);
           oscillator.stop(audioContext.currentTime + i * chirpInterval + chirpDuration);
         }
@@ -139,7 +140,7 @@
           const sampleRate = audioBuffer.sampleRate;
 
           for (let i = 0; i < numChirps; i++) {
-            const freqIndex = Math.floor(i / repeatsPerFreq);
+            const freqIndex = i % numFrequencies;
             const freq = frequencies[freqIndex];
 
             // Extract segment for this chirp
